@@ -1,72 +1,87 @@
 #include <Servo.h>
 
-// Define ultrasonic sensor and motor pins
-#define trigPin 5
-#define echoPin 6
-#define servoPin 8
+//Pins (UNO)
+const uint8_t TRIG = 6;       // HC-SR04 TRIG
+const uint8_t ECHO = 5;       // HC-SR04 ECHO (5V tolerant on UNO)
+const uint8_t SERVO_PIN = 8;  // servo signal
 
-float duration; // Travel time in microseconds
-float distance; // Distance in centimeters
-int angle; // Position of the servo motor
+//Timing
+const unsigned long PULSE_TIMEOUT_US = 20000UL; // 20 ms (~3.4 m max)
+const uint16_t SETTLE_AFTER_MOVE_MS  = 30;      // let horn stop wobbling
+const uint16_t MIN_PING_PERIOD_MS    = 60;      // HC-SR04 needs >= 60 ms
 
-Servo servoMotor; // Create servoMotor object
+//Constants
+const float SOUND_CM_PER_US = 0.0343f;
+
+Servo servoMotor;
+
+// Single ping. Returns NaN on timeout/out-of-range.
+float pingOnce(unsigned long &dur) {
+  digitalWrite(TRIG, LOW);  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+
+  dur = pulseIn(ECHO, HIGH, PULSE_TIMEOUT_US);
+  if (dur == 0) return NAN;
+
+  float d = (dur * SOUND_CM_PER_US) / 2.0f;
+  if (d > 400.0f) return NAN;
+  return d;
+}
+
+// Median of up to 3 values, ignoring NaNs; NaN if all invalid.
+float median3_ignoreNaN(float a, float b, float c) {
+  float v[3]; uint8_t n = 0;
+  if (!isnan(a)) v[n++] = a;
+  if (!isnan(b)) v[n++] = b;
+  if (!isnan(c)) v[n++] = c;
+  if (n == 0) return NAN;
+  // insertion sort for up to 3
+  for (uint8_t i=1;i<n;i++){
+    float key=v[i]; int j=i-1;
+    while (j>=0 && v[j]>key){ v[j+1]=v[j]; j--; }
+    v[j+1]=key;
+  }
+  // median
+  return v[n/2];
+}
 
 void setup() {
-  pinMode(trigPin, OUTPUT); // Trig
-  pinMode(echoPin, INPUT); // Echo
-  servoMotor.attach(servoPin); // Servo motor
-  Serial.begin(9600);
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+  digitalWrite(TRIG, LOW);
+
+  servoMotor.attach(SERVO_PIN);
+  servoMotor.write(0);
+
+  Serial.begin(115200);   //Python/Serial Monitor to 115200
+  delay(1000);
+  Serial.println("START");
+}
+
+void measureAndPrintAtAngle(int angle) {
+  servoMotor.write(angle);
+  delay(SETTLE_AFTER_MOVE_MS);   // 1) settle
+
+  // 2) ping 3× quickly
+  unsigned long d1u, d2u, d3u;
+  float d1 = pingOnce(d1u); delay(10);
+  float d2 = pingOnce(d2u); delay(10);
+  float d3 = pingOnce(d3u);
+
+  float dmed = median3_ignoreNaN(d1, d2, d3);
+
+  // 3) print once per angle (CSV expected by  Python)
+  Serial.print(angle);
+  Serial.print(',');
+  if (isnan(dmed)) Serial.println("NA");
+  else             Serial.println(dmed, 2);
+
+  // 4) respect sensor cadence
+  delay(MIN_PING_PERIOD_MS);
 }
 
 void loop() {
-
-  // Rotate 0 to 180 degrees
-  for (angle = 0; angle <= 180; angle++) { // Increase by 1 degree
-    servoMotor.write(angle);
-    delay(30);
-    calculateDistance(angle);
-    if (angle % 2 == 0) // Display data for angles in increments of 2
-      displayData();
-  }
-  // Rotate 180 to 0 degrees
-  for (angle = 180; angle >= 0; angle--) { // Decrease by 1 degree
-    servoMotor.write(angle);
-    delay(30);
-    calculateDistance(angle);
-    if (angle % 2 == 0) // Display data for angles in increments of 2
-      displayData();
-  }
-
-}
-
-// Calculate distance
-float calculateDistance(int angle) {
-
-  // Clear trigPin
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-
-  // Turn on trigPin for 10 microseconds
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-
-  // Duration in microseconds
-  duration = pulseIn(echoPin, HIGH);
-
-  // Calculate distance
-  distance = duration * (0.0343) / 2; // Duration in microseconds multiplied by speed of sound in cm/μs divided by 2
-
-  // Distance is set to 0 when the sensor is unreadable
-  if (distance >= 400 || distance <= 3) {
-    distance = 0;
-  }
-
-}
-
-// Display data
-void displayData() {
-  Serial.print(angle); // Display angle
-  Serial.print(",");
-  Serial.println(distance); // Display distance (cm)
+  for (int a = 0; a <= 180; ++a)  measureAndPrintAtAngle(a);
+  for (int a = 180; a >= 0; --a)  measureAndPrintAtAngle(a);
 }
